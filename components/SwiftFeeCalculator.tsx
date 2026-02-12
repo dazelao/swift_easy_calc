@@ -1,28 +1,9 @@
 /* eslint-disable @next/next/no-img-element */
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type Theme = "light" | "dark";
-type Currency = "USD" | "EUR";
-
-type HistoryEntry = {
-  id: string;
-  timestamp: string;
-  amount: number;
-  currency: Currency;
-  feeUsd: number;
-  feeUah: number;
-  rateDate: string;
-  usdRate: number;
-  eurRate: number;
-  limited?: boolean;
-  rawFeeUsd?: number;
-  rawFeeUah?: number;
-  diffUsd?: number;
-  diffUah?: number;
-};
-
 type NbuRate = {
   cc: string;
   rate: number;
@@ -33,7 +14,6 @@ type NbuResponse = NbuRate[];
 
 const MAX_FEE_USD = 90;
 const SIGNIFICANT_UAH = 400_000;
-const HISTORY_STORAGE_KEY = "swiftCalculatorHistory";
 
 type Calculation = {
   feeUsd: number;
@@ -42,9 +22,6 @@ type Calculation = {
   rawFeeUah: number;
   diffUsd: number;
   diffUah: number;
-  significantUsd: number;
-  significantEur: number;
-  maxFeeUah: number;
 };
 
 function getEffectiveDate(selected?: string | null): Date {
@@ -115,8 +92,8 @@ async function fetchNbuRates(date: Date): Promise<{
 
 export const SwiftFeeCalculator = () => {
   const [theme, setTheme] = useState<Theme>("light");
-  const [amount, setAmount] = useState<string>("");
-  const [currency, setCurrency] = useState<Currency>("USD");
+  const [usdAmount, setUsdAmount] = useState<string>("");
+  const [eurAmount, setEurAmount] = useState<string>("");
   const [rateDateInput, setRateDateInput] = useState<string>(() =>
     new Date().toISOString().slice(0, 10)
   );
@@ -129,8 +106,6 @@ export const SwiftFeeCalculator = () => {
   const [ratesError, setRatesError] = useState<string | null>(null);
 
   const [copyHintVisible, setCopyHintVisible] = useState(false);
-  const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [calculation, setCalculation] = useState<Calculation | null>(null);
 
   // theme init
   useEffect(() => {
@@ -138,19 +113,6 @@ export const SwiftFeeCalculator = () => {
     const stored = window.localStorage.getItem("theme") as Theme | null;
     const initial: Theme = stored === "dark" || stored === "light" ? stored : "light";
     setTheme(initial);
-
-    // history init
-    const rawHistory = window.localStorage.getItem(HISTORY_STORAGE_KEY);
-    if (rawHistory) {
-      try {
-        const parsed = JSON.parse(rawHistory) as HistoryEntry[];
-        if (Array.isArray(parsed)) {
-          setHistory(parsed);
-        }
-      } catch {
-        // ignore broken history
-      }
-    }
   }, []);
 
   useEffect(() => {
@@ -196,18 +158,16 @@ export const SwiftFeeCalculator = () => {
     };
   }, [rateDateInput]);
 
-  const computeCalculation = (): Calculation | null => {
+  const calculation: Calculation | null = useMemo(() => {
     if (!usdRate || !eurRate) return null;
 
-    const value = parseFloat(amount || "0") || 0;
-    if (!value) return null;
+    const usdVal = parseFloat(usdAmount || "0") || 0;
+    const eurVal = parseFloat(eurAmount || "0") || 0;
+    if (!usdVal && !eurVal) return null;
 
     let baseUsd = 0;
-    if (currency === "USD") {
-      baseUsd = value;
-    } else {
-      baseUsd = value * (eurRate / usdRate);
-    }
+    if (usdVal > 0) baseUsd = usdVal;
+    if (eurVal > 0) baseUsd = eurVal * (eurRate / usdRate);
 
     const rawFeeUsd = 12 + baseUsd * 0.005;
     const feeUsd = rawFeeUsd > MAX_FEE_USD ? MAX_FEE_USD : rawFeeUsd;
@@ -217,104 +177,17 @@ export const SwiftFeeCalculator = () => {
     const diffUah = diffUsd * usdRate;
     const rawFeeUah = rawFeeUsd * usdRate;
 
-    const significantUsd = SIGNIFICANT_UAH / usdRate;
-    const significantEur = SIGNIFICANT_UAH / eurRate;
-    const maxFeeUah = MAX_FEE_USD * usdRate;
-
     return {
       feeUsd,
       feeUah,
       rawFeeUsd,
       rawFeeUah,
       diffUsd,
-      diffUah,
-      significantUsd,
-      significantEur,
-      maxFeeUah
+      diffUah
     };
-  };
+  }, [usdAmount, eurAmount, usdRate, eurRate]);
 
   const feeUahDisplay = calculation ? calculation.feeUah.toFixed(2) : "0.00";
-
-  const persistHistory = (entries: HistoryEntry[]) => {
-    setHistory(entries);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(entries));
-    }
-  };
-
-  const handleCalculate = () => {
-    const result = computeCalculation();
-    if (!result) return;
-
-    setCalculation(result);
-
-    const numericAmount = parseFloat(amount || "0") || 0;
-    if (!numericAmount) return;
-
-    const entry: HistoryEntry = {
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      timestamp: new Date().toISOString(),
-      amount: numericAmount,
-      currency,
-      feeUsd: result.feeUsd,
-      feeUah: result.feeUah,
-      rateDate,
-      usdRate,
-      eurRate,
-      limited: result.rawFeeUsd > MAX_FEE_USD,
-      rawFeeUsd: result.rawFeeUsd,
-      rawFeeUah: result.rawFeeUah,
-      diffUsd: result.diffUsd,
-      diffUah: result.diffUah
-    };
-
-    const next = [entry, ...history].slice(0, 100);
-    persistHistory(next);
-  };
-
-  const handleClearHistory = () => {
-    persistHistory([]);
-  };
-
-  const handleDownloadCsv = () => {
-    if (!history.length || typeof window === "undefined") return;
-
-    const header = [
-      "timestamp",
-      "amount",
-      "currency",
-      "feeUsd",
-      "feeUah",
-      "rateDate",
-      "usdRate",
-      "eurRate"
-    ];
-
-    const rows = history.map((h) =>
-      [
-        h.timestamp,
-        h.amount.toString().replace(".", ","),
-        h.currency,
-        h.feeUsd.toFixed(2).replace(".", ","),
-        h.feeUah.toFixed(2).replace(".", ","),
-        h.rateDate,
-        h.usdRate.toString().replace(".", ","),
-        h.eurRate.toString().replace(".", ",")
-      ].join(";")
-    );
-
-    const csv = [header.join(";"), ...rows].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = window.URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "swift_calc_history.csv";
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    window.URL.revokeObjectURL(url);
-  };
 
   const handleCopy = async () => {
     const text = `${feeUahDisplay} грн`;
@@ -345,79 +218,12 @@ export const SwiftFeeCalculator = () => {
   const sectionTextClass = "text-black";
   const smallTextClass = "text-black";
 
-  return (
-    <div className="flex w-full max-w-5xl gap-4">
-      {/* history sidebar */}
-      <div className="w-64 shrink-0">
-        <div className="bg-white rounded-2xl shadow-lg p-4 h-full flex flex-col">
-          <div className="flex items-center justify-between mb-2">
-            <h2 className="text-sm font-semibold text-black">Історія викликів</h2>
-            <button
-              type="button"
-              onClick={handleClearHistory}
-              disabled={!history.length}
-              className="text-xs text-red-600 disabled:text-gray-300"
-            >
-              очистити
-            </button>
-          </div>
-          <div className="flex justify-between items-center mb-2">
-            <button
-              type="button"
-              onClick={handleDownloadCsv}
-              disabled={!history.length}
-              className="text-xs px-2 py-1 border rounded-md hover:bg-gray-100 disabled:text-gray-300 disabled:border-gray-200"
-            >
-              CSV
-            </button>
-          </div>
-          <div className="flex-1 overflow-y-auto space-y-2 text-xs">
-            {history.length === 0 && (
-              <div className="text-gray-500 text-xs">
-                Поки немає записів. Додай результат кнопкою під калькулятором.
-              </div>
-            )}
-            {history.map((item) => {
-              const limited = item.limited && item.diffUsd !== undefined;
-              return (
-                <div
-                  key={item.id}
-                  className={`border rounded-md p-2 cursor-default ${
-                    limited
-                      ? "bg-red-50 border-red-300 hover:bg-red-100"
-                      : "hover:bg-gray-50"
-                  }`}
-                >
-                  <div className="font-mono text-[11px] text-gray-600">
-                    {new Date(item.timestamp).toLocaleString("uk-UA")}
-                  </div>
-                  <div>
-                    {item.amount} {item.currency}
-                  </div>
-                  <div>
-                    комісія: {item.feeUsd.toFixed(2)} USD /{" "}
-                    {item.feeUah.toFixed(2)} грн
-                  </div>
-                  {limited && (
-                    <div className="mt-1 text-[11px] text-red-700">
-                      Ліміт 90 USD спрацював, економія:{" "}
-                      {item.diffUsd?.toFixed(2)} USD /{" "}
-                      {item.diffUah?.toFixed(2)} грн
-                    </div>
-                  )}
-                  <div className="text-[11px] text-gray-600 mt-1">
-                    курс: USD {item.usdRate.toFixed(4)}, EUR{" "}
-                    {item.eurRate.toFixed(4)}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
+  const significantUsd = usdRate ? SIGNIFICANT_UAH / usdRate : null;
+  const significantEur = eurRate ? SIGNIFICANT_UAH / eurRate : null;
+  const maxFeeUah = usdRate ? MAX_FEE_USD * usdRate : null;
 
-      {/* main calculator card */}
-      <div className={cardClasses}>
+  return (
+    <div className={cardClasses}>
       <h1 className={`text-xl font-semibold ${textMainClass}`}>
         SWIFT калькулятор комісії
       </h1>
@@ -463,41 +269,38 @@ export const SwiftFeeCalculator = () => {
 
       <div className="space-y-2">
         <label className={`block text-sm font-medium ${textMainClass}`}>
-          Сума
+          Сума в доларах (USD)
         </label>
-        <div className="flex gap-2">
-          <input
-            type="number"
-            min={0}
-            step="0.01"
-            placeholder="Введіть суму"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                handleCalculate();
-              }
-            }}
-            className="w-full border rounded-lg p-2 focus:ring focus:ring-blue-200 bg-white text-gray-900"
-          />
-          <select
-            value={currency}
-            onChange={(e) => setCurrency(e.target.value as Currency)}
-            className="border rounded-lg px-2 py-2 bg-white text-gray-900"
-          >
-            <option value="USD">USD</option>
-            <option value="EUR">EUR</option>
-          </select>
-        </div>
-        <button
-          type="button"
-          onClick={handleCalculate}
-          disabled={!parseFloat(amount || "0") || !usdRate || !eurRate}
-          className="mt-2 w-full text-sm px-3 py-2 border rounded-md hover:bg-gray-100 disabled:text-gray-300 disabled:border-gray-200"
-        >
-          розрахувати
-        </button>
+        <input
+          type="number"
+          min={0}
+          step="0.01"
+          placeholder="Введіть суму в USD"
+          value={usdAmount}
+          onChange={(e) => {
+            setUsdAmount(e.target.value);
+            if (e.target.value) setEurAmount("");
+          }}
+          className="w-full border rounded-lg p-2 focus:ring focus:ring-blue-200 bg-white text-gray-900"
+        />
+      </div>
+
+      <div className="space-y-2">
+        <label className={`block text-sm font-medium ${textMainClass}`}>
+          Сума в євро (EUR)
+        </label>
+        <input
+          type="number"
+          min={0}
+          step="0.01"
+          placeholder="Введіть суму в EUR"
+          value={eurAmount}
+          onChange={(e) => {
+            setEurAmount(e.target.value);
+            if (e.target.value) setUsdAmount("");
+          }}
+          className="w-full border rounded-lg p-2 focus:ring focus:ring-blue-200 bg-white text-gray-900"
+        />
       </div>
 
       <div className="bg-gray-50 rounded-lg p-4 space-y-3">
@@ -510,10 +313,10 @@ export const SwiftFeeCalculator = () => {
           >
             <div>{SIGNIFICANT_UAH.toLocaleString("uk-UA")} грн</div>
             <div>
-              {calculation ? calculation.significantUsd.toFixed(2) : "—"} USD
+              {significantUsd !== null ? significantUsd.toFixed(2) : "—"} USD
             </div>
             <div>
-              {calculation ? calculation.significantEur.toFixed(2) : "—"} EUR
+              {significantEur !== null ? significantEur.toFixed(2) : "—"} EUR
             </div>
           </div>
         </div>
@@ -526,7 +329,7 @@ export const SwiftFeeCalculator = () => {
             className={`grid grid-cols-2 gap-2 text-sm mt-1 ${sectionTextClass}`}
           >
             <div>
-              {calculation ? calculation.maxFeeUah.toFixed(2) : "—"} грн
+              {maxFeeUah !== null ? maxFeeUah.toFixed(2) : "—"} грн
             </div>
             <div>{MAX_FEE_USD} USD</div>
           </div>
@@ -607,8 +410,12 @@ export const SwiftFeeCalculator = () => {
           <div className="text-xs text-red-600 mt-1">Помилка: {ratesError}</div>
         )}
       </div>
-      </div>
     </div>
   );
 };
+
+/*
+ * Упрощённая версия без истории и кнопки расчёта:
+ * всё считается автоматически при вводе суммы / смене валюти.
+ */
 
