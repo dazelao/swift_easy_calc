@@ -1,0 +1,404 @@
+/* eslint-disable @next/next/no-img-element */
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+
+type Theme = "light" | "dark";
+type Currency = "USD" | "EUR";
+
+type NbuRate = {
+  cc: string;
+  rate: number;
+  exchangedate: string;
+};
+
+type NbuResponse = NbuRate[];
+
+const MAX_FEE_USD = 90;
+const SIGNIFICANT_UAH = 400_000;
+
+function getEffectiveDate(selected?: string | null): Date {
+  if (selected) {
+    return new Date(selected);
+  }
+  const now = new Date();
+  if (now.getHours() < 8) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - 1);
+    return d;
+  }
+  return now;
+}
+
+async function fetchNbuRates(date: Date): Promise<{
+  usdRate: number;
+  eurRate: number;
+  rateDate: string;
+}> {
+  const dateStr = date.toISOString().slice(0, 10).replace(/-/g, "");
+  const cacheKey = `nbuRates_${dateStr}`;
+
+  if (typeof window !== "undefined") {
+    const cached = window.localStorage.getItem(cacheKey);
+    if (cached) {
+      const data = JSON.parse(cached) as {
+        usd: number;
+        eur: number;
+        date: string;
+      };
+      return {
+        usdRate: data.usd,
+        eurRate: data.eur,
+        rateDate: data.date
+      };
+    }
+  }
+
+  const url = `https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?date=${dateStr}&json`;
+  const res = await fetch(url);
+  const data = (await res.json()) as NbuResponse;
+
+  const usd = data.find((c) => c.cc === "USD");
+  const eur = data.find((c) => c.cc === "EUR");
+
+  if (!usd || !eur) {
+    throw new Error("Не знайдено курсів USD/EUR в відповіді НБУ");
+  }
+
+  const usdRate = usd.rate;
+  const eurRate = eur.rate;
+  const rateDate = usd.exchangedate;
+
+  if (typeof window !== "undefined") {
+    window.localStorage.setItem(
+      cacheKey,
+      JSON.stringify({
+        usd: usdRate,
+        eur: eurRate,
+        date: rateDate
+      })
+    );
+  }
+
+  return { usdRate, eurRate, rateDate };
+}
+
+export const SwiftFeeCalculator = () => {
+  const [theme, setTheme] = useState<Theme>("light");
+  const [amount, setAmount] = useState<string>("");
+  const [currency, setCurrency] = useState<Currency>("USD");
+  const [rateDateInput, setRateDateInput] = useState<string>(() =>
+    new Date().toISOString().slice(0, 10)
+  );
+
+  const [usdRate, setUsdRate] = useState(0);
+  const [eurRate, setEurRate] = useState(0);
+  const [rateDate, setRateDate] = useState("");
+
+  const [isLoadingRates, setIsLoadingRates] = useState(false);
+  const [ratesError, setRatesError] = useState<string | null>(null);
+
+  const [copyHintVisible, setCopyHintVisible] = useState(false);
+
+  // theme init
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem("theme") as Theme | null;
+    const initial: Theme = stored === "dark" || stored === "light" ? stored : "light";
+    setTheme(initial);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("theme", theme);
+    const body = document.body;
+    if (theme === "dark") {
+      body.classList.add("bg-gray-900");
+      body.classList.remove("bg-gray-100");
+    } else {
+      body.classList.add("bg-gray-100");
+      body.classList.remove("bg-gray-900");
+    }
+  }, [theme]);
+
+  // load rates
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      setIsLoadingRates(true);
+      setRatesError(null);
+      try {
+        const effectiveDate = getEffectiveDate(rateDateInput);
+        const { usdRate, eurRate, rateDate } = await fetchNbuRates(effectiveDate);
+        if (cancelled) return;
+        setUsdRate(usdRate);
+        setEurRate(eurRate);
+        setRateDate(rateDate);
+      } catch (e) {
+        if (cancelled) return;
+        setRatesError(
+          e instanceof Error ? e.message : "Помилка завантаження курсів НБУ"
+        );
+      } finally {
+        if (!cancelled) {
+          setIsLoadingRates(false);
+        }
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [rateDateInput]);
+
+  const calculations = useMemo(() => {
+    if (!usdRate || !eurRate) {
+      return null;
+    }
+
+    const value = parseFloat(amount || "0") || 0;
+
+    let baseUsd = 0;
+    if (currency === "USD") {
+      baseUsd = value;
+    } else {
+      baseUsd = value * (eurRate / usdRate);
+    }
+
+    let rawFeeUsd = 12 + baseUsd * 0.005;
+    let feeUsd = rawFeeUsd > MAX_FEE_USD ? MAX_FEE_USD : rawFeeUsd;
+
+    const feeUah = feeUsd * usdRate;
+    const diffUsd = rawFeeUsd > MAX_FEE_USD ? rawFeeUsd - MAX_FEE_USD : 0;
+    const diffUah = diffUsd * usdRate;
+    const rawFeeUah = rawFeeUsd * usdRate;
+
+    const significantUsd = SIGNIFICANT_UAH / usdRate;
+    const significantEur = SIGNIFICANT_UAH / eurRate;
+    const maxFeeUah = MAX_FEE_USD * usdRate;
+
+    return {
+      feeUsd,
+      feeUah,
+      rawFeeUsd,
+      rawFeeUah,
+      diffUsd,
+      diffUah,
+      significantUsd,
+      significantEur,
+      maxFeeUah
+    };
+  }, [amount, currency, usdRate, eurRate]);
+
+  const feeUahDisplay = calculations ? calculations.feeUah.toFixed(2) : "0.00";
+
+  const handleCopy = async () => {
+    const text = `${feeUahDisplay} грн`;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      setCopyHintVisible(true);
+      setTimeout(() => setCopyHintVisible(false), 1500);
+    } catch {
+      // тихо игнорим, не критично
+    }
+  };
+
+  const cardClasses =
+    "bg-white rounded-2xl shadow-lg p-6 w-full max-w-md space-y-4 transition-colors";
+
+  const textMainClass = "text-black";
+  const textSecondaryClass = "text-black";
+  const sectionTitleClass = "text-black";
+  const sectionTextClass = "text-black";
+  const smallTextClass = "text-black";
+
+  return (
+    <div className={cardClasses}>
+      <h1 className={`text-xl font-semibold ${textMainClass}`}>
+        SWIFT калькулятор комісії
+      </h1>
+      <p className={`text-sm ${textSecondaryClass}`}>
+        Формула: <strong>12 + 0.5%</strong> від суми, але не більше{" "}
+        <strong>90</strong> USD
+        <br />
+        Результат у гривнях за{" "}
+        <a
+          href="https://bank.gov.ua/ua/markets/exchangerates"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="font-semibold text-blue-500 underline cursor-pointer"
+        >
+          офіційним курсом НБУ
+        </a>
+      </p>
+
+      <div className="flex justify-between items-center gap-3">
+        <div className="flex items-center gap-2">
+          <label
+            htmlFor="rateDateSelect"
+            className={`text-sm font-medium ${textMainClass}`}
+          >
+            Дата курсу:
+          </label>
+          <input
+            id="rateDateSelect"
+            type="date"
+            value={rateDateInput}
+            onChange={(e) => setRateDateInput(e.target.value)}
+            className="border rounded-lg px-2 py-1 text-sm bg-white text-gray-900"
+          />
+        </div>
+        <button
+          type="button"
+          onClick={() => setTheme((prev) => (prev === "light" ? "dark" : "light"))}
+          className="text-sm font-semibold px-4 py-2 border-2 border-gray-400 rounded-lg text-gray-800 bg-white hover:bg-gray-100 transition-colors"
+        >
+          {theme === "light" ? "🌙 Темна тема" : "☀️ Світла тема"}
+        </button>
+      </div>
+
+      <div className="space-y-2">
+        <label className={`block text-sm font-medium ${textMainClass}`}>
+          Сума
+        </label>
+        <div className="flex gap-2">
+          <input
+            type="number"
+            min={0}
+            step="0.01"
+            placeholder="Введіть суму"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            className="w-full border rounded-lg p-2 focus:ring focus:ring-blue-200 bg-white text-gray-900"
+          />
+          <select
+            value={currency}
+            onChange={(e) => setCurrency(e.target.value as Currency)}
+            className="border rounded-lg px-2 py-2 bg-white text-gray-900"
+          >
+            <option value="USD">USD</option>
+            <option value="EUR">EUR</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="bg-gray-50 rounded-lg p-4 space-y-3">
+        <div className="border-b pb-2">
+          <div className={`text-sm font-semibold ${sectionTitleClass}`}>
+            Значна сума на сьогодні
+          </div>
+          <div
+            className={`grid grid-cols-3 gap-2 text-sm mt-1 ${sectionTextClass}`}
+          >
+            <div>{SIGNIFICANT_UAH.toLocaleString("uk-UA")} грн</div>
+            <div>
+              {calculations ? calculations.significantUsd.toFixed(2) : "—"} USD
+            </div>
+            <div>
+              {calculations ? calculations.significantEur.toFixed(2) : "—"} EUR
+            </div>
+          </div>
+        </div>
+
+        <div className="border-b pb-2">
+          <div className={`text-sm font-semibold ${sectionTitleClass}`}>
+            Максимальна комісія
+          </div>
+          <div
+            className={`grid grid-cols-2 gap-2 text-sm mt-1 ${sectionTextClass}`}
+          >
+            <div>
+              {calculations ? calculations.maxFeeUah.toFixed(2) : "—"} грн
+            </div>
+            <div>{MAX_FEE_USD} USD</div>
+          </div>
+        </div>
+
+        <div className={`text-sm ${sectionTextClass}`}>
+          Фактична комісія (USD екв.):{" "}
+          <span className="font-semibold">
+            {calculations ? calculations.feeUsd.toFixed(2) : "0.00"}
+          </span>
+        </div>
+        <div className={`text-sm flex items-center gap-2 ${sectionTextClass}`}>
+          Фактична комісія (UAH):{" "}
+          <span className="font-semibold">{feeUahDisplay}</span>
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="text-sm px-3 py-1.5 border rounded-md hover:bg-gray-100 whitespace-nowrap"
+            title="Скопіювати суму"
+          >
+            скопіювати
+          </button>
+        </div>
+        <div
+          className={`text-xs text-green-600 transition-opacity h-4 ${
+            copyHintVisible ? "opacity-100" : "opacity-0"
+          }`}
+        >
+          Скопійовано
+        </div>
+
+        {calculations && calculations.rawFeeUsd > MAX_FEE_USD && (
+          <div className="space-y-1 text-sm text-orange-700">
+            <div>
+              Комісія без обмеження (USD екв.):{" "}
+              <span className="font-semibold">
+                {calculations.rawFeeUsd.toFixed(2)}
+              </span>
+            </div>
+            <div>
+              Комісія без обмеження (UAH):{" "}
+              <span className="font-semibold">
+                {calculations.rawFeeUah.toFixed(2)}
+              </span>
+            </div>
+            <div>
+              Економія завдяки ліміту 90 (USD екв.):{" "}
+              <span className="font-semibold">
+                {calculations.diffUsd.toFixed(2)}
+              </span>
+            </div>
+            <div>
+              Економія завдяки ліміту 90 (UAH):{" "}
+              <span className="font-semibold">
+                {calculations.diffUah.toFixed(2)}
+              </span>
+            </div>
+          </div>
+        )}
+
+        <div className={`text-xs ${smallTextClass}`}>
+          Курс НБУ USD:{" "}
+          <span className="font-mono">
+            {usdRate ? usdRate.toFixed(4) : isLoadingRates ? "..." : "—"}
+          </span>
+        </div>
+        <div className={`text-xs ${smallTextClass}`}>
+          Курс НБУ EUR:{" "}
+          <span className="font-mono">
+            {eurRate ? eurRate.toFixed(4) : isLoadingRates ? "..." : "—"}
+          </span>
+        </div>
+        <div className={`text-xs ${smallTextClass}`}>
+          Дата курсу НБУ: <span>{rateDate || (isLoadingRates ? "..." : "—")}</span>
+        </div>
+
+        {ratesError && (
+          <div className="text-xs text-red-600 mt-1">Помилка: {ratesError}</div>
+        )}
+      </div>
+    </div>
+  );
+};
+
